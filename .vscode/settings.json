@@ -1,0 +1,11 @@
+{
+  "idf.currentSetup": "E:\\esp\\v6.1\\esp-idf",
+  "clangd.path": "E:\\Espressif\\tools\\esp-clangd\\esp-21.1.3_20260408\\esp-clangd\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:\\Users\\MinhDao\\Documents\\SmartUGV2026\\SmartUGV_ESP32\\build"
+  ],
+  "idf.port": "COM17",
+  "idf.flashType": "UART"
+}

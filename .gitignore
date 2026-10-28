@@ -1,0 +1,46 @@
+# ==========================================
+# ESP-IDF Build & Temporary Files
+# ==========================================
+build/
+sdkconfig.old
+sdkconfig.ci
+dependencies.lock
+managed_components/
+
+# ==========================================
+# C/C++ Indexing & Toolchain Cache
+# ==========================================
+.clangd/
+*.idx
+compile_commands.json
+
+# ==========================================
+# VS Code & IDEs
+# ==========================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/c_cpp_properties.json
+!.vscode/launch.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Eclipse CDT files (tự sinh từ template)
+.project
+.cproject
+.settings/
+
+# ==========================================
+# OS Generated Files
+# ==========================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+
+# ==========================================
+# Credentials & Secrets (Khuyên dùng khi push lên GitHub)
+# ==========================================
+secrets.h
+*.env
