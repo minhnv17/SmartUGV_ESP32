@@ -19,7 +19,11 @@
 #error "Copy main/secrets.example.h to main/secrets.h and configure GEMINI_API_KEY"
 #endif
 #include "mic.h"
+#include "mic_frontend.h"
 #include "speaker.h"
+#include "robot_face.h"
+#include "live_tools.h"
+#include "music.h"
 
 #define RX_LIMIT (128 * 1024)
 #define CHUNK_SAMPLES 320
@@ -40,14 +44,29 @@ static bool s_message;
 static char s_resume[2048];
 static size_t s_audio_bytes;
 static atomic_bool s_model_speaking;
+static atomic_uint s_processing_since;
 
-void gemini_on_audio(const int16_t *pcm, size_t samples) { speaker_queue_pcm24(pcm, samples); }
-void gemini_on_interrupted(void) { speaker_flush(); atomic_store(&s_model_speaking, false); }
+void gemini_on_audio(const int16_t *pcm, size_t samples)
+{
+    speaker_set_voice_pending(true);
+    speaker_queue_pcm24(pcm, samples);
+}
+void gemini_on_interrupted(void)
+{
+    speaker_flush();
+    speaker_set_voice_pending(false);
+    atomic_store(&s_model_speaking, false);
+    atomic_store(&s_processing_since, 0);
+}
 
 static void restart_session(void)
 {
+    live_tools_reset();
     speaker_flush();
+    speaker_set_voice_pending(false);
     atomic_store(&s_model_speaking, false);
+    atomic_store(&s_processing_since, 0);
+    robot_face_set_status(ROBOT_RECONNECTING);
     xEventGroupClearBits(s_events, READY);
     xEventGroupSetBits(s_events, RESTART);
 }
@@ -57,6 +76,7 @@ static void transcript(cJSON *content, const char *field, const char *label)
     cJSON *item = cJSON_GetObjectItemCaseSensitive(content, field);
     cJSON *text = cJSON_GetObjectItemCaseSensitive(item, "text");
     if (cJSON_IsString(text) && text->valuestring[0]) {
+        atomic_store(&s_processing_since, xTaskGetTickCount());
         // Each line is a streaming fragment, not necessarily a complete sentence.
         printf("%s: %s\n", label, text->valuestring);
     }
@@ -72,9 +92,12 @@ static void receive_message(void)
     }
     if (cJSON_GetObjectItemCaseSensitive(root, "setupComplete")) {
         xEventGroupSetBits(s_events, READY);
-        ESP_LOGI(TAG, "LIVE SAN SANG: noi truc tiep gan mic, khong can bam BOOT");
+        robot_face_set_status(ROBOT_LISTENING);
+        ESP_LOGI(TAG, "LIVE SAN SANG: noi truc tiep gan mic");
         ESP_LOGI(TAG, "Mic dang duoc gui lien tuc toi Gemini; tra loi qua loa va serial; cho loa phat xong roi noi tiep");
     }
+    live_tools_cancel(cJSON_GetObjectItemCaseSensitive(root, "toolCallCancellation"));
+    if (!live_tools_submit(cJSON_GetObjectItemCaseSensitive(root, "toolCall"))) restart_session();
     cJSON *resume = cJSON_GetObjectItemCaseSensitive(root, "sessionResumptionUpdate");
     cJSON *handle = cJSON_GetObjectItemCaseSensitive(resume, "newHandle");
     if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(resume, "resumable")) &&
@@ -122,7 +145,9 @@ static void receive_message(void)
     }
     if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(content, "turnComplete"))) {
         speaker_end_turn();
+        speaker_set_voice_pending(false);
         atomic_store(&s_model_speaking, false);
+        atomic_store(&s_processing_since, 0);
         ESP_LOGI(TAG, "Xong luot Gemini, audio nhan=%u bytes (24kHz); tiep tuc nghe", (unsigned)s_audio_bytes);
         s_audio_bytes = 0;
     }
@@ -180,9 +205,15 @@ static bool send_setup(esp_websocket_client_handle_t client)
         "\"systemInstruction\":{\"parts\":[{\"text\":\"\"}]},"
         "\"inputAudioTranscription\":{},\"outputAudioTranscription\":{},"
         "\"realtimeInputConfig\":{\"automaticActivityDetection\":{"
-        "\"disabled\":false,\"prefixPaddingMs\":200,\"silenceDurationMs\":600}},"
+        "\"disabled\":false,\"startOfSpeechSensitivity\":\"START_SENSITIVITY_HIGH\","
+        "\"endOfSpeechSensitivity\":\"END_SENSITIVITY_LOW\","
+        "\"prefixPaddingMs\":80,\"silenceDurationMs\":1000}},"
         "\"sessionResumption\":{},\"contextWindowCompression\":{\"slidingWindow\":{}}}}");
     if (!setup) return false;
+    if (!live_tools_add_declarations(cJSON_GetObjectItemCaseSensitive(setup, "setup"))) {
+        cJSON_Delete(setup);
+        return false;
+    }
     cJSON *instruction = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(
         cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(setup, "setup"),
             "systemInstruction"), "parts"), 0);
@@ -206,6 +237,15 @@ static bool send_setup(esp_websocket_client_handle_t client)
     return ok;
 }
 
+static void log_mic_level(mic_frontend_t *frontend)
+{
+    if (!frontend->samples) return;
+    mic_frontend_stats_t stats = mic_frontend_take_stats(frontend);
+    ESP_LOGI(TAG, "MIC level: raw_rms=%u raw_peak=%u near_fs=%u/1000 output_rms=%u output_peak=%u gain=%u.%02ux",
+             stats.raw_rms, stats.raw_peak, stats.near_full_scale_per_mille,
+             stats.output_rms, stats.output_peak, stats.gain_percent / 100, stats.gain_percent % 100);
+}
+
 static void live_task(void *arg)
 {
     int16_t pcm[CHUNK_SAMPLES];
@@ -215,6 +255,10 @@ static void live_task(void *arg)
     snprintf(headers, sizeof(headers), "x-goog-api-key: %s\r\n", GEMINI_API_KEY);
     unsigned backoff = 1;
     for (;;) {
+        mic_frontend_t frontend;
+        mic_frontend_init(&frontend);
+        bool mic_muted = false;
+        robot_face_set_status(ROBOT_CONNECTING_LIVE);
         xEventGroupClearBits(s_events, CONNECTED | READY | RESTART);
         s_audio_bytes = 0;
         esp_websocket_client_config_t config = {
@@ -238,6 +282,30 @@ static void live_task(void *arg)
             esp_err_t ret = mic_read_pcm16(pcm, CHUNK_SAMPLES, &count, 100);
             EventBits_t bits = xEventGroupGetBits(s_events);
             if (bits & RESTART) break;
+            if (live_tools_failed()) { restart_session(); break; }
+            if (bits & READY) {
+                bool speaking = atomic_load(&s_model_speaking) || speaker_voice_is_busy();
+                unsigned processing = atomic_load(&s_processing_since);
+                bool thinking = processing && (TickType_t)(xTaskGetTickCount() - processing) < pdMS_TO_TICKS(10000);
+                music_state_t music = music_state();
+                robot_status_t status = ROBOT_LISTENING;
+                if (music == MUSIC_BUFFERING) status = ROBOT_MUSIC_BUFFERING;
+                else if (music == MUSIC_PLAYING) status = ROBOT_MUSIC_PLAYING;
+                else if (music == MUSIC_PAUSED) status = ROBOT_MUSIC_PAUSED;
+                else if (music == MUSIC_ERROR) status = ROBOT_MUSIC_ERROR;
+                else if (thinking) status = ROBOT_THINKING;
+                if (music_is_searching()) status = ROBOT_MUSIC_SEARCHING;
+                if (speaking) status = ROBOT_SPEAKING;
+                robot_face_set_status(status);
+                char *reply;
+                // Send at most one batch per mic frame, keeping audio moving.
+                if (live_tools_take_reply(&reply)) {
+                    int length = strlen(reply);
+                    bool sent = esp_websocket_client_send_text(client, reply, length, pdMS_TO_TICKS(500)) == length;
+                    cJSON_free(reply);
+                    if (!sent) break;
+                }
+            }
             if (!(bits & READY) && xTaskGetTickCount() - began > pdMS_TO_TICKS(30000)) {
                 ESP_LOGW(TAG, "Live setup timeout");
                 break;
@@ -253,16 +321,21 @@ static void live_task(void *arg)
             }
             if (!(bits & READY) || count == 0) continue;
             backoff = 1;
-            // Live VAD needs a useful speech level. Fixed gain preserves timing;
-            // saturate before casting to avoid signed 16-bit wraparound.
-            for (size_t i = 0; i < count; ++i) {
-                int value = (int)pcm[i] * 4;
-                if (value > INT16_MAX) value = INT16_MAX;
-                if (value < INT16_MIN) value = INT16_MIN;
-                pcm[i] = (int16_t)value;
-            }
             // Half duplex prevents the speaker from triggering server VAD.
-            if (atomic_load(&s_model_speaking) || speaker_is_busy()) memset(pcm, 0, count * sizeof(int16_t));
+            bool muted = atomic_load(&s_model_speaking) || speaker_is_busy();
+            if (muted != mic_muted) {
+                if (muted && frontend.samples >= MIC_SAMPLE_RATE / 5) log_mic_level(&frontend);
+                mic_frontend_init(&frontend);
+            }
+            mic_muted = muted;
+            if (muted) {
+                memset(pcm, 0, count * sizeof(int16_t));
+            } else {
+                mic_frontend_process(&frontend, pcm, count);
+                if (frontend.samples >= 5 * MIC_SAMPLE_RATE) {
+                    log_mic_level(&frontend);
+                }
+            }
             size_t length = 0;
             if (mbedtls_base64_encode(encoded, sizeof(encoded), &length, (unsigned char *)pcm, count * 2) != 0) break;
             encoded[length] = 0;
@@ -280,6 +353,8 @@ static void live_task(void *arg)
             esp_websocket_client_destroy(client);
         }
         gemini_on_interrupted();
+        robot_face_set_status(ROBOT_RECONNECTING);
+        live_tools_reset();
         ESP_LOGW(TAG, "Thu lai sau %u giay; resume %s", backoff, s_resume[0] ? "available" : "unavailable (new context)");
         TickType_t until = xTaskGetTickCount();
         while (xTaskGetTickCount() - until < pdMS_TO_TICKS(backoff * 1000)) {
@@ -298,6 +373,11 @@ esp_err_t gemini_start(void)
              (unsigned)(system_prompt_end - system_prompt_start - 1));
     if (!GEMINI_API_KEY[0] || strcmp(GEMINI_API_KEY, "YOUR_GEMINI_API_KEY_HERE") == 0 || strlen(GEMINI_API_KEY) > 200) return ESP_ERR_INVALID_ARG;
     s_events = xEventGroupCreate();
+    if (live_tools_start() != ESP_OK) {
+        if (s_events) vEventGroupDelete(s_events);
+        s_events = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     s_rx = heap_caps_malloc(RX_LIMIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_audio = heap_caps_malloc(RX_LIMIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_events && s_rx && s_audio && xTaskCreate(live_task, "gemini_live", 12288, NULL, 4, &s_task) == pdPASS) return ESP_OK;

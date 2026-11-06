@@ -2,3 +2,5 @@ dependencies:
   idf: ">=6.0"
   espressif/cjson: "^1.7.19~2"
   espressif/esp_websocket_client: "^1.5.0"
+  espressif/esp_audio_codec: "2.6.2"
+  espressif/esp_audio_effects: "1.4.4"

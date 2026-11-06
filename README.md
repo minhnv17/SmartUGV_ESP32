@@ -35,8 +35,8 @@ prompt không tự thay đổi kết nối hoặc cách gửi mic.
    Live dùng `GEMINI_MODEL` trong cùng file `main/gemini.h`.
 2. Mở môi trường ESP-IDF, chạy `idf.py build`, sau đó
    `idf.py -p COM17 flash monitor`.
-3. Chờ `LIVE SAN SANG`, nói gần mic rồi dừng một nhịp.
-   **Không cần bấm BOOT.** Gemini tự nhận biết lượt nói.
+3. Chờ `LIVE SAN SANG`/`DANG NGHE`, nói rồi dừng khoảng một giây.
+   **Không cần bấm nút.** Gemini tự nhận biết lượt nói.
 4. Xem `Ban noi:` và `Gemini:` ở 115200 baud, UTF-8.
    Mỗi dòng có thể chỉ là một phần transcript đang được truyền về.
 5. Câu trả lời được phát qua loa. Chờ loa nói xong rồi nói tiếp; bản hiện tại
@@ -46,12 +46,138 @@ Khi Live sẵn sàng, mic gửi âm thanh liên tục tới Google Gemini, bao g
 âm thanh nền. Ngắt nguồn để dừng phiên. Lịch sử nằm trong phiên Live;
 reset board sẽ mở phiên mới. Không chia sẻ API key hoặc session handle.
 
+## Màn hình trạng thái và biểu cảm
+
+Màn hình tích hợp ILI9341V dùng bố cục ngang 320×240 để đặt trên xe,
+hiển thị khuôn mặt Cá, có chớp mắt và
+chuyển động miệng khi đang trả lời. Dòng trạng thái đổi theo firmware: khởi
+động, kết nối Wi-Fi/Gemini, đang nghe, đang xử lý, đang trả lời, kết nối lại
+và lỗi. `DANG NGHE` nghĩa là Live sẵn sàng gửi mic, chưa phải nhận từ đánh
+thức. `DANG XU LY` là chỉ báo từ transcript mới nhận, tối đa 10 giây nếu
+không có phản hồi; chuyển động miệng là hoạt ảnh, chưa bám theo biên độ PCM.
+Trạng thái trả lời bao gồm tích đệm và phần đuôi âm của loa.
+
+Gemini được cấp công cụ `set_expression` với 5 biểu cảm: `neutral`, `happy`,
+`sad`, `surprised`, `sleepy`. Prompt hướng dẫn chọn theo sắc thái hội thoại
+hoặc yêu cầu trực tiếp, ví dụ “Cá ơi, làm mặt vui”, “Cá ơi, làm mặt buồn”,
+“Cá ơi, làm mặt ngạc nhiên”. Việc gọi công cụ do model quyết định; không
+phải bộ nhận diện cảm xúc của người dùng. Mỗi biểu cảm giữ tối đa 15 giây
+kể từ lệnh gần nhất rồi về bình thường. Lỗi/kết nối lại được ưu tiên mặt
+buồn. Nhãn trên LCD dùng tiếng Việt không dấu với font 5×7 tích hợp.
+
+Task màn hình ưu tiên thấp, không vẽ trong callback WebSocket. Framebuffer
+150 KB ở PSRAM, truyền DMA từng dải 16 dòng qua bộ đệm SRAM 10 KB; không
+cần thêm LVGL hoặc thư viện ngoài. Phản hồi công cụ được xếp hàng và gửi
+bởi task Live với `scheduling: SILENT`, tránh thao tác socket trong callback.
+Nếu khởi tạo LCD thất bại, hội thoại vẫn chạy và không khai báo công cụ màn
+hình; lỗi truyền LCD sau đó tắt đèn nền và báo công cụ không khả dụng.
+Phản hồi `accepted` chỉ xác nhận firmware nhận lệnh, chưa xác minh ảnh trên
+LCD vật lý. Cảm ứng FT6336G được dùng cho các nút điều khiển nhạc.
+
+Mặc định màn hình xoay 90°. Nếu lắp ngang theo chiều ngược lại và hình bị
+lộn đầu, chạy `idf.py menuconfig` → `Robot Display` → bật
+`Flip landscape display 180 degrees`, rồi build/nạp lại. Hai chiều đều dùng
+bố cục 320×240; khuôn mặt và chữ được vẽ lại theo khổ ngang.
+
+Sau khi build/nạp, kiểm tra khuôn mặt xuất hiện trước khi Wi-Fi sẵn sàng,
+trạng thái nghe/nói qua vài lượt hội thoại, rồi lần lượt yêu cầu các biểu
+cảm. Kiểm tra tự về bình thường sau 15 giây và thử mất mạng/kết nối lại.
+Quan sát LCD và nghe loa cùng lúc để xác nhận hoạt ảnh không làm hụt audio.
+
+## Nhạc trực tuyến NhacCuaTui
+
+ESP tự gọi API tìm kiếm và nhận luồng MP3 từ NhacCuaTui; không cần thẻ SD
+hoặc backend trên máy tính. Cần Wi-Fi hoạt động. Các lệnh mẫu:
+
+- “Cá ơi, mở bài Như Một Người Rưng của OSAD.”
+- “Cá ơi, tìm bài Nơi Này Có Anh của Sơn Tùng.”
+- Sau khi tạm dừng: “Tiếp tục phát nhạc”, “Dừng nhạc”, “Mở bài khác”.
+- “Đặt âm lượng nhạc 50 phần trăm.” Âm lượng giọng Gemini giữ nguyên.
+
+Gemini gọi `search_music(query)` để lấy tối đa 5 kết quả, rồi
+`play_music(track_id)` bằng mã bài từ lần tìm gần nhất. Khi không rõ bản
+nào, model được hướng dẫn hỏi lại. `control_music` hỗ trợ pause/resume/stop;
+`set_music_volume` nhận 0–100, mặc định 70%; `get_music_status` đọc trạng
+thái. Lệnh phát trả `buffering` khi đã nhận yêu cầu; chỉ trạng thái `playing`
+mới cho biết bộ phát đã bắt đầu ghi PCM vào I2S, chưa xác minh tiếng vật lý.
+
+**Trong lúc nhạc phát, chạm nút `TAM DUNG` ở dưới màn hình; chờ khoảng một
+giây rồi nói lệnh tiếp.** Nút bên trái đổi thành `TIEP TUC` để phát tiếp;
+nút `DUNG` bên phải kết thúc bài. Các nút cũng xuất hiện khi đang tải nhạc.
+Khi phát/tạm dừng, màn hình chuyển sang giao diện nghe nhạc riêng: tên bài
+dài tự cuộn, ca sĩ, cột biên độ âm thanh, thời gian và thanh tiến độ. Cột
+âm thanh lấy peak của PCM nhạc đã chỉnh gain, không phải phân tích phổ FFT;
+khi tạm dừng hoặc nhạc không có PCM mới thì cột về mức nghỉ. Thời gian dựa
+trên số mẫu đã gửi I2S nên có thể đi trước tiếng thực tế khoảng độ sâu DMA.
+Nút `-`/`+` giảm/tăng 5%; chạm hoặc kéo thanh âm lượng rồi thả để đặt 0–100%.
+Gain đổi dần qua một gói PCM để giảm tiếng tách khi thay âm lượng.
+BOOT không được dùng để điều khiển nhạc. Hiện chưa có khử vọng AEC; mic gửi
+im lặng trong lúc loa phát nhạc, nên cần dùng cảm ứng để tạm dừng trước khi
+nói yêu cầu đổi bài hoặc trò chuyện.
+
+Cảm ứng FT6336G địa chỉ I2C `0x38`, SDA16/SCL15 dùng chung bus I2C0 đã được
+mic khởi tạo; chỉ reset cảm ứng qua GPIO18. Driver đọc theo chu kỳ 20 ms,
+không sử dụng ngắt GPIO17 và không tạo bus I2C thứ hai. Tọa độ tự xoay theo
+`Flip landscape display 180 degrees`. Nút chỉ nhận chạm khi đã xuất hiện
+trong một frame LCD truyền xong; cần chạm/thả ổn định, giữ ngón không lặp
+lệnh, kéo ra ngoài nút hoặc chạm nhiều ngón sẽ hủy lần chạm. Riêng kéo thanh
+âm lượng giữ thao tác trong vùng âm lượng, kẹp giá trị ở 0 và 100%. Khi cảm ứng báo
+lỗi, nút chuyển màu xám và ngừng nhận thao tác đến khi đọc cảm ứng ổn định
+trở lại. Cần thử độ khớp tọa độ trên màn hình thật sau khi nạp.
+
+Tìm kiếm/lấy thông tin chạy ở task công cụ, ngoài callback WebSocket. Nhạc
+chạy ở task riêng; duy nhất task loa ghi I2S. Hàng đợi giọng được ưu tiên,
+nhạc giữ lại dữ liệu khi giọng đang phát. Reset phiên Gemini hủy các công
+cụ đang đợi của phiên cũ; một bài đang phát tiếp tục độc lập với phiên đó.
+
+Nguồn được chọn là MP3 128 kbps có `status: 1`, `onlyVIP: false` và bài có
+`statusPlay: 1`. Mỗi lần mở bài lấy URL mới từ chi tiết bài. Metadata ID3 lớn
+được đọc bỏ từng phần; MP3 stereo được trộn mono và đổi tần số có lọc xuống
+16 kHz để dùng chung clock với mic. Bộ đệm PCM nhạc tối đa khoảng 1,9 giây
+ở PSRAM; không tải toàn bộ bài vào RAM. Dải tần nhạc bị giới hạn bởi đầu ra
+mono 16 kHz hiện tại.
+
+PCM sau chuyển mẫu được gom thành gói 480 mẫu (30 ms); phần cuối lẻ vẫn
+được gửi khi hết bài. Khi có nhạc sẵn sàng, task loa kiểm tra giọng theo
+kiểu không chờ rồi ghi I2S để DMA điều tiết tốc độ. Bản trước chờ hàng đợi
+giọng 20 ms mỗi gói, có thể làm hụt DMA nếu gói nhạc ngắn hơn 20 ms. Khi chờ
+tích đệm vẫn nhường CPU cho decoder. Log `Music PCM refill gap` giúp theo
+dõi khoảng chờ dài trong lúc phát liên tục.
+
+Tạm dừng giữ bộ đệm/decoder, đóng kết nối HTTP. Tiếp tục mở kết nối Range
+tại byte kế tiếp; nếu CDN không hỗ trợ đúng Range hoặc link không còn hiệu
+lực, báo lỗi và cần mở lại bài. Đổi/dừng bài tăng epoch để bỏ PCM cũ. Mạng
+quá chậm, lỗi TLS, dữ liệu lỗi hoặc bài không khả dụng được báo ở log và
+màn hình. Tên bài trên LCD được bỏ dấu, viết hoa, tối đa 51 ký tự.
+
+Thư viện `esp_audio_codec` 2.6.2 và `esp_audio_effects` 1.4.4 được quản lý
+trong manifest. Nguồn khảo sát và các endpoint nằm ở
+[báo cáo NhacCuaTui](docs/nhaccuatui_research.md).
+
+Kiểm thử host độc lập với phần cứng sau khi đã tải dependencies bằng IDF:
+
+```powershell
+cmake -S tests -B build/host_music_tests -G "Visual Studio 17 2022" -A x64
+cmake --build build/host_music_tests --config Debug
+ctest --test-dir build/host_music_tests -C Debug --output-on-failure
+```
+
+Các bài kiểm thử bao gồm parser dữ liệu/cờ khả dụng/URL, giữ nguyên biên
+UTF-8, nhãn tiếng Việt và mô phỏng task loa: ưu tiên giọng, giữ nhạc khi tạm
+dừng, bỏ frame bài cũ khi đổi bài, tiếp tục sau khi flush giọng, phát đoạn
+ngắn. Mô phỏng chạy đơn luồng, chưa thay cho kiểm tra timing trên ESP.
+
 ## Luồng âm thanh
 
 - LMA2718B → ES8311 ADC → I2S → PCM mono LE16, 16 kHz.
-- Tăng biên độ mic 4 lần, bão hòa trong miền int16 để tránh tràn số.
+- Lọc DC/ù trầm khoảng 51 Hz, gain mic thích nghi tối đa 12 lần thay cho
+  cố định 4 lần. Gain tăng dần khi tín hiệu yếu vượt ngưỡng thích nghi,
+  giảm khi tín hiệu lớn và giới hạn peak đầu ra 30000 để tránh cắt đỉnh.
+  Gần im lặng không đẩy gain lên tối đa; không dùng noise gate cắt âm nhỏ.
 - Mỗi gói khoảng 20 ms, mã hóa base64 và gửi `realtimeInput.audio`.
-- Gemini dùng VAD phía server, khoảng im lặng 600 ms để kết thúc lượt nói.
+- Gemini dùng VAD phía server: start HIGH, end LOW, prefix 80 ms và khoảng
+  im lặng 1000 ms để giữ tên bài dài/ngập ngừng trong cùng lượt. Đổi từ
+  600 lên 1000 ms làm thời gian chờ trả lời tăng khoảng 400 ms.
 - Nhận transcript đầu vào, transcript câu trả lời và audio PCM 24 kHz.
 - Audio trả về được sao chép vào hàng đợi PSRAM khoảng 10 giây, không chặn
   task WebSocket. Task loa lọc FIR rồi chuyển mẫu 24 → 16 kHz, giữ đúng tốc độ.
@@ -89,6 +215,10 @@ ngắt ampli. Các tình huống mất mạng dài vẫn cần kiểm thử thê
 
 | Chức năng | GPIO |
 | --- | --- |
+| LCD SPI MOSI / SCLK / CS / DC | 11 / 12 / 10 / 46 |
+| LCD đèn nền, bật mức cao | 45 |
+| FT6336G SDA / SCL, địa chỉ 0x38, chung bus codec | 16 / 15 |
+| FT6336G reset, mức thấp | 18 |
 | ES8311 SDA / SCL, địa chỉ 0x18 | 16 / 15 |
 | I2S MCLK / BCLK / LRCK | 4 / 5 / 7 |
 | I2S mic vào ESP32 | 6 |
@@ -98,6 +228,9 @@ ngắt ampli. Các tình huống mất mạng dài vẫn cần kiểm thử thê
 Cấu hình N16R8: flash 16 MB, PSRAM Octal 40 MHz; phân vùng app 1500 KB.
 Dependency cJSON và esp_websocket_client được quản lý trong
 `main/idf_component.yml`.
+LCD dùng `esp_lcd`/SPI có sẵn trong ESP-IDF, reset mềm vì chân reset màn
+hình nối chung EN của ESP32. Cấu hình panel theo
+[mã khởi tạo ILI9341V của LCDWIKI](https://www.lcdwiki.com/res/ES3C28P/ILI9341V_Init.txt).
 
 ## Mã nguồn
 
@@ -105,16 +238,25 @@ Dependency cJSON và esp_websocket_client được quản lý trong
 - `gemini.c/.h`: toàn bộ Gemini Live: cấu hình, WebSocket, PCM, transcript,
   session resumption và hook audio/interruption. Model và API key ở `gemini.h`.
 - `mic.c/.h`: codec ES8311, bus I2C, I2S RX/TX và mức âm lượng DAC.
+- `mic_frontend.c/.h`: lọc DC, gain mic thích nghi, giới hạn peak và thống kê mức thu.
 - `speaker.c/.h`: hàng đợi PSRAM, chuyển mẫu và task phát loa.
 - `wifi.c/.h`: Wi-Fi station.
+- `robot_face.c/.h`: LCD ILI9341, khuôn mặt động, trạng thái và biểu cảm.
+- `nct_catalog.c`, `nct_music.c/.h`: parser và HTTP cho tìm bài/chi tiết NCT.
+- `music.c/.h`: tải MP3, giải mã, chuyển mẫu, tạm dừng/tiếp tục.
+- `live_tools.c/.h`: khai báo công cụ, worker HTTP và phản hồi theo phiên Live.
+- `display_text.c/.h`: chuyển tên bài tiếng Việt thành nhãn ASCII trên LCD.
+- `touch_input.c/.h`, `touch_ui.c/.h`: FT6336G, xoay tọa độ và nút nhạc cảm ứng.
 
-Các bản thử nghiệm văn bản và ghi WAV gửi REST đã được loại bỏ. Dự án chỉ
-còn một luồng Gemini Live và một nơi cấu hình Gemini.
+Các bản thử nghiệm văn bản và ghi WAV gửi REST đã được loại bỏ. Hội thoại
+dùng một luồng Gemini Live và một nơi cấu hình Gemini; nhạc là nguồn âm
+thanh riêng, dùng chung task phát loa.
 
 ## Chẩn đoán
 
 - Chưa có `LIVE SAN SANG`: xem log Wi-Fi, TLS, WebSocket và setup timeout.
-- Không có transcript: nói gần mic, kiểm tra mạng và quyền truy cập model Live.
+- Không có transcript: kiểm tra trạng thái `DANG NGHE`, log `MIC level`,
+  mạng và quyền truy cập model Live. Mic gửi im lặng khi loa còn phát.
 - `Dang phat Gemini qua loa` và `Phat xong ... mau PCM` ghi lại đường phát I2S.
   Nghe thử loa để xác nhận tiếng thực tế; log TX không tự xác minh chất lượng âm.
 - Tiếng nhỏ/rè: chỉnh `SPEAKER_DAC_VOLUME` và kiểm tra loa/nguồn cấp.
@@ -164,6 +306,63 @@ Tài liệu: [LCDWIKI](https://www.lcdwiki.com/2.8inch_ESP32-S3_Display),
   nói rõ chưa có công cụ điều khiển động cơ và chưa lưu tên lâu dài.
 - Chưa triển khai WakeNet/chờ đánh thức hoặc xác minh chủ nhân; kết nối và
   cách gửi mic vẫn như trước. Quy tắc prompt không bảo đảm lọc hết tiếng TV.
+
+## Kiểm thử màn hình ngày 06/11/2026
+
+- Build thành công với ESP-IDF 6.1 cho ESP32-S3; app còn khoảng 29% phân vùng.
+- Render thử bố cục ngang 320×240 bằng chính các hàm vẽ C: đủ 5 biểu cảm và mặt lỗi, chữ nằm trong
+  màn hình. Đã chạy 240 tổ hợp trạng thái/biểu cảm/khung hoạt ảnh với vùng
+  canh hai đầu framebuffer không bị ghi đè.
+- Chưa nạp bản màn hình lên board, chưa xác nhận màu/hướng ảnh trên LCD thật
+  hoặc việc Gemini gọi công cụ trong phiên Live thực tế. Cần kiểm tra cùng
+  mic/loa theo hướng dẫn ở phần màn hình.
+
+## Kiểm thử tích hợp nhạc ngày 06/11/2026
+
+- Build ESP-IDF 6.1 cho ESP32-S3 thành công, app còn khoảng 20% phân vùng.
+- Chín bài kiểm thử host đã qua; render 1170 tổ hợp trạng thái/biểu cảm/khung
+  hoạt ảnh/âm lượng/tiến độ, kiểm tra vùng canh framebuffer và bố cục nhạc 320×240.
+- API/đoạn MP3 được kiểm tra bằng HTTP trên máy trong bước khảo sát.
+- Chưa nạp bản nhạc lên board, chưa kiểm tra phiên Gemini gọi các công cụ
+  mới, TLS đồng thời trên ESP, giải mã/phát nguyên bài, cảm ứng và Range
+  tiếp tục trên phần cứng. Cần thử hội thoại → tìm/phát → chạm tạm dừng → tiếp tục/đổi
+  bài → dừng, nghe loa và xem LCD; thử thêm mất mạng và bài lỗi.
+- Đã bỏ task/nút BOOT điều khiển nhạc. Các kiểm thử cảm ứng bao gồm hai
+  chiều lắp ngang, mép nút, chạm/thả, giữ ngón, kéo ngón, đổi giao diện giữa
+  lần chạm, nhiều ngón và lỗi đọc cảm ứng. Chưa xác nhận tọa độ vật lý.
+- Kiểm thử DMA mô phỏng với 60 gói PCM 10 ms tái hiện 59 lần hụt ở mã cũ,
+  không còn hụt sau sửa. Kiểm tra gain đổi êm, đếm mẫu tiến độ và volume slider
+  đều qua. Đọc log COM17 trong 12 giây không có dòng phát nhạc phù hợp;
+  chưa nghe lại trên loa thật để xác nhận tình trạng rè đã hết.
+
+## Thu giọng nói và tên bài hát ngày 06/11/2026
+
+- Build ESP-IDF 6.1 thành công, app còn 20% phân vùng. Cả 10 bài kiểm thử
+  host qua; kiểm tra offline chuỗi JSON setup và sáu khai báo công cụ qua.
+  Gemini Live trả `setupComplete` với cấu hình VAD, prompt và công cụ mới
+  trong hai phiên thử trên máy. Câu văn bản có tên bài ngập ngừng gọi
+  `search_music`; câu chưa có tên bài không gọi tìm/phát. Phép thử không
+  thực thi công cụ nhạc và không đánh giá ASR. Chưa nạp bản thu mic lên board.
+- Mục tiêu cần thử trên board: nói bình thường cách 1–2 m trong phòng yên.
+  Đây chưa phải khoảng cách đã được đo/xác nhận. Không tăng thêm gain codec;
+  gain phần mềm không phục hồi được tiếng đã chìm trong nhiễu hoặc ADC bị clip.
+- Frontend mới có kiểm thử tín hiệu yếu, chuyển đột ngột sang lớn, nhiễu
+  mức thấp, DC, cực trị int16, khung lẻ và reset sau mute. Đây là PCM tổng hợp,
+  chưa chứng minh độ chính xác nhận tên bài hay khả năng thu xa của mic thật.
+- `MIC level` ghi mỗi 5 giây đang thu hoặc trước lượt loa nếu đã thu ít nhất
+  200 ms: RMS/peak đầu vào và đầu ra, gain cuối cửa sổ, `near_fs` là tỷ lệ
+  mẫu đầu vào gần full-scale (phần nghìn). Log chỉ ghi thống kê, không ghi âm.
+  So sánh phòng im và cùng một câu ở 0,5 / 1 / 2 m; nếu RMS khi nói gần bằng
+  nền, cần kiểm tra lỗ mic/hướng lắp hoặc giải pháp mic khác. Peak gần 32768
+  và `near_fs` lớn khi nói là dấu hiệu cần xem lại gain codec/đầu vào.
+- Mic frontend không học mức loa: reset lúc đổi mute và mở phiên mới.
+  Chạm tạm dừng nhạc, chờ màn hình nghe rồi mới nói; chưa có AEC.
+- Prompt/công cụ tìm bài dùng phần tên đã nghe để tìm trước khi hỏi lại.
+  Chỉ hỏi phần thiếu hoặc tối đa hai lựa chọn nếu còn mơ hồ; không tự phát
+  bài đầu tiên không khớp. Đây là hướng dẫn model, cần thử hành vi Live thực tế.
+- Tham khảo VAD: [Google StartSensitivity](https://googleapis.github.io/js-genai/release_docs/enums/types.StartSensitivity.html),
+  [EndSensitivity](https://googleapis.github.io/js-genai/release_docs/enums/types.EndSensitivity.html),
+  [AutomaticActivityDetection](https://googleapis.github.io/js-genai/release_docs/interfaces/types.AutomaticActivityDetection.html).
 
 ## API key và Git
 

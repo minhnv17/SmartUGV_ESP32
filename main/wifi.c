@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 
 #include "wifi.h"
+#include "robot_face.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -26,6 +27,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
+        robot_face_set_wifi(false);
         if (s_retry_num < 5)
         {
             esp_wifi_connect();
@@ -43,6 +45,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)event_data;
         ESP_LOGI(TAG, "Da nhan IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
+        robot_face_set_wifi(true);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }

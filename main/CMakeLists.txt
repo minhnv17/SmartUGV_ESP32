@@ -7,7 +7,16 @@ idf_component_register(
         wifi.c
         gemini.c
         mic.c
+        mic_frontend.c
         speaker.c
+        robot_face.c
+        nct_music.c
+        nct_catalog.c
+        music.c
+        live_tools.c
+        display_text.c
+        touch_ui.c
+        touch_input.c
     INCLUDE_DIRS
         "."
     EMBED_TXTFILES
@@ -21,6 +30,11 @@ idf_component_register(
         esp_driver_i2s
         esp_driver_i2c
         esp_driver_gpio
+        esp_driver_spi
+        esp_lcd
+        esp_http_client
+        espressif__esp_audio_codec
+        espressif__esp_audio_effects
         espressif__cjson
         espressif__esp_websocket_client
 )
